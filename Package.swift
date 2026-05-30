@@ -13,7 +13,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "MacAppClean",
-            path: "Sources/MacAppClean"
+            path: "Sources/MacAppClean",
+            exclude: ["Resources", "Assets.xcassets"]
         )
     ]
 )

@@ -7,7 +7,7 @@ if not API_KEY:
     print("❌ 请先设置环境变量: export OPENAI_API_KEY=sk-...")
     sys.exit(1)
 
-PROMPT = "A cute kawaii cartoon cat icon for a macOS app, simple flat design with soft rounded shapes, round face with big sparkly anime-style eyes, tiny pink nose, small mouth, orange and cream fur patches, pointy ears with pink inner, optional little pink blush cheeks, clean white background, minimal vector illustration style, centered composition, perfect for app icon, soft pastel colors"
+PROMPT = "A cute kawaii cartoon cat icon for a macOS app cleaner utility. The cat is orange and cream with bright friendly eyes, holding a small blue microfiber cloth and polishing a clean silver disk or app window, with tiny sparkles to communicate cleanup and removing junk files. Modern macOS rounded-square app icon, centered composition, soft 3D vector style, pastel mint and sky-blue clean background, polished but simple, readable at small sizes. No text, no letters, no watermark, no clutter."
 
 print("🎨 正在生成猫咪图标...")
 req = urllib.request.Request(

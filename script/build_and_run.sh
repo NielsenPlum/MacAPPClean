@@ -28,7 +28,9 @@ cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 
 # Copy icon
-if [ -f "$ROOT_DIR/Sources/MacAppClean/Resources/AppIcon.png" ]; then
+if [ -f "$ROOT_DIR/Sources/MacAppClean/Resources/AppIcon.icns" ]; then
+    cp "$ROOT_DIR/Sources/MacAppClean/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
+elif [ -f "$ROOT_DIR/Sources/MacAppClean/Resources/AppIcon.png" ]; then
     cp "$ROOT_DIR/Sources/MacAppClean/Resources/AppIcon.png" "$APP_RESOURCES/AppIcon.png"
 fi
 
