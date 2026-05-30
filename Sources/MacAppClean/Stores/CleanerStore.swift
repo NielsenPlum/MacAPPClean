@@ -112,29 +112,12 @@ final class CleanerStore {
             scanned += await scanLargeFiles()
 
             scanProgress = "正在检查安全状态..."
-            scanned += await scanSecurity(items: scanned)
+            scanned = await scanSecurity(items: scanned)
 
             scanProgress = "正在检查更新..."
             scanned = await checkUpdates(items: scanned)
 
-            // 最终去重：移除 appURL 相同的重复项
-            var deduped: [CleanerItem] = []
-            var seenAppURLs = Set<String>()
-            for item in scanned {
-                if item.section == .applications, let appURL = item.appURL {
-                    let key = appURL.resolvingSymlinksInPath().path
-                    if !seenAppURLs.insert(key).inserted {
-                        if let existingIdx = deduped.firstIndex(where: { $0.appURL?.resolvingSymlinksInPath().path == key }) {
-                            if item.size > deduped[existingIdx].size {
-                                deduped[existingIdx] = item
-                            }
-                        }
-                        continue
-                    }
-                }
-                deduped.append(item)
-            }
-            scanned = deduped
+            scanned = deduplicatedItems(scanned)
 
             try? await Task.sleep(for: .milliseconds(200))
             self.items = scanned
@@ -483,7 +466,7 @@ final class CleanerStore {
 
             var largeFiles: [ScannedFile] = []
 
-            for case let fileURL as URL in enumerator {
+            while let fileURL = enumerator.nextObject() as? URL {
                 guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
                       values.isRegularFile == true,
                       let fileSize = values.fileSize,
@@ -594,6 +577,37 @@ final class CleanerStore {
 
     // MARK: - Helpers
 
+    private func deduplicatedItems(_ items: [CleanerItem]) -> [CleanerItem] {
+        var deduped: [CleanerItem] = []
+        var seenKeys: [String: Int] = [:]
+
+        for item in items {
+            let key = deduplicationKey(for: item)
+            if let existingIndex = seenKeys[key] {
+                if item.size > deduped[existingIndex].size {
+                    deduped[existingIndex] = item
+                }
+            } else {
+                seenKeys[key] = deduped.count
+                deduped.append(item)
+            }
+        }
+
+        return deduped
+    }
+
+    private func deduplicationKey(for item: CleanerItem) -> String {
+        if let appURL = item.appURL {
+            return "\(item.section.rawValue):\(appURL.resolvingSymlinksInPath().standardizedFileURL.path)"
+        }
+
+        if let firstFile = item.files.first {
+            return "\(item.section.rawValue):\(firstFile.url.resolvingSymlinksInPath().standardizedFileURL.path)"
+        }
+
+        return "\(item.section.rawValue):\(item.name):\(item.developer)"
+    }
+
     private func installedAppBundleIDs() -> Set<String> {
         var ids = Set<String>()
         let fm = FileManager.default
@@ -690,6 +704,30 @@ final class CleanerStore {
 
         items.removeAll { selectedIDs.contains($0.id) }
         selectedItemID = nil
+    }
+
+    func remove(item: CleanerItem, filePaths: Set<String>) {
+        guard !filePaths.isEmpty else { return }
+
+        let fm = FileManager.default
+        if let appURL = item.appURL, filePaths.contains(appURL.path), fm.fileExists(atPath: appURL.path) {
+            try? fm.trashItem(at: appURL, resultingItemURL: nil)
+        }
+
+        for file in item.files where filePaths.contains(file.url.path) && fm.fileExists(atPath: file.url.path) {
+            try? fm.trashItem(at: file.url, resultingItemURL: nil)
+        }
+
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            let appWasRemoved = item.appURL.map { filePaths.contains($0.path) } ?? false
+            if appWasRemoved || filePaths.count >= item.files.count + (item.appURL == nil ? 0 : 1) {
+                items.remove(at: index)
+                selectedItemID = nil
+            } else {
+                items[index].files.removeAll { filePaths.contains($0.url.path) }
+                items[index].size = max(0, items[index].size - item.files.filter { filePaths.contains($0.url.path) }.map(\.size).reduce(0, +))
+            }
+        }
     }
 }
 

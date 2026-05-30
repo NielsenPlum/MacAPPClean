@@ -6,13 +6,13 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             SidebarView(store: store)
-                .navigationSplitViewColumnWidth(min: 230, ideal: 250)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 250)
         } content: {
             CleanerListView(store: store)
-                .navigationSplitViewColumnWidth(min: 430, ideal: 520)
+                .navigationSplitViewColumnWidth(min: 360, ideal: 500)
         } detail: {
             InspectorView(store: store)
-                .navigationSplitViewColumnWidth(min: 310, ideal: 360)
+                .navigationSplitViewColumnWidth(min: 420, ideal: 680)
         }
         .searchable(text: $store.query, placement: .toolbar, prompt: "搜索应用、开发者、文件")
         .toolbar {

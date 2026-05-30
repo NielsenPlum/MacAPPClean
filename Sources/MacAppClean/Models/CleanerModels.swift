@@ -74,6 +74,25 @@ struct ScannedFile: Identifiable, Hashable {
         case leftover = "残留"
         case largeFile = "大文件"
         case other = "其他"
+
+        var detailTitle: String {
+            switch self {
+            case .app: "可执行文件"
+            case .support: "应用程序支持"
+            case .cache: "缓存"
+            case .preferences: "偏好设置"
+            case .log: "日志"
+            case .launchAgent: "启动代理"
+            case .extensionFile: "扩展"
+            case .leftover: "残留文件"
+            case .largeFile: "大文件"
+            case .other: "其他"
+            }
+        }
+
+        static var uninstallOrder: [ScannedFile.FileCategory] {
+            [.app, .support, .cache, .preferences, .log, .launchAgent, .extensionFile, .leftover, .largeFile, .other]
+        }
     }
 }
 
