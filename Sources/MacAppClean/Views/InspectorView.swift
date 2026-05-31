@@ -365,7 +365,8 @@ private struct UninstallFileRow: View {
                 Text(entry.displayLocation)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
             }
 
             Spacer(minLength: 12)
@@ -481,19 +482,7 @@ private struct UninstallEntry: Identifiable, Hashable {
     var defaultSelected: Bool
 
     var displayLocation: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let parent = url.deletingLastPathComponent().path
-
-        if parent == "/Applications" {
-            return "/Applications"
-        }
-
-        if parent.hasPrefix(home) {
-            let shortened = parent.replacingOccurrences(of: home, with: NSUserName())
-            return shortened
-        }
-
-        return parent
+        url.deletingLastPathComponent().path
     }
 }
 
@@ -773,10 +762,11 @@ private struct FileLine: View {
                         .padding(.vertical, 1)
                         .background(riskColor.opacity(0.12), in: Capsule())
                 }
-                Text(file.url.deletingLastPathComponent().lastPathComponent)
+                Text(file.url.deletingLastPathComponent().path)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
 
                 if let match = file.matchedBy.first {
                     Text(match)

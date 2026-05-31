@@ -238,7 +238,7 @@ private struct CleanupBar: View {
                 Label("删除清单", systemImage: "list.bullet.rectangle")
                     .font(.subheadline)
             }
-            .disabled(store.restorableTrashCount == 0)
+            .disabled(store.deletionHistoryCount == 0)
 
             Button {
                 store.removeSelected()
@@ -269,7 +269,7 @@ private struct DeletionListSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("删除清单")
                         .font(.title2.weight(.semibold))
-                    Text("选择要恢复的 App 或项目")
+                    Text("查看历史卸载记录，并恢复仍在废纸篓中的项目")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -285,7 +285,7 @@ private struct DeletionListSheet: View {
             Divider()
 
             if store.deletedTrashBatches.isEmpty {
-                ContentUnavailableView("没有可恢复项目", systemImage: "trash", description: Text("通过 MacAppClean 移入废纸篓的项目会出现在这里。"))
+                ContentUnavailableView("没有删除记录", systemImage: "trash", description: Text("通过 MacAppClean 移入废纸篓的项目会出现在这里。"))
                     .frame(minHeight: 260)
             } else {
                 List {
@@ -302,16 +302,17 @@ private struct DeletionListSheet: View {
                                 Text("\(batch.itemCount) 个项目 · \(batch.formattedSize) · \(batch.removedAt.formatted(date: .abbreviated, time: .shortened))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                Text(batch.statusText)
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(batch.canRestore ? .green : .secondary)
                             }
 
                             Spacer()
 
                             Button("恢复") {
                                 store.restoreDeletedBatch(id: batch.id)
-                                if store.deletedTrashBatches.isEmpty {
-                                    dismiss()
-                                }
                             }
+                            .disabled(!batch.canRestore)
                         }
                         .padding(.vertical, 8)
                     }

@@ -37,7 +37,7 @@ struct ContentView: View {
                 } label: {
                     Label("删除清单", systemImage: "list.bullet.rectangle")
                 }
-                .disabled(store.restorableTrashCount == 0)
+                .disabled(store.deletionHistoryCount == 0)
             }
         }
         .alert("无法完成移除", isPresented: cleanupErrorIsPresented) {
@@ -110,7 +110,7 @@ private struct DeletionListView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("删除清单")
                         .font(.title2.weight(.semibold))
-                    Text("选择要从废纸篓恢复的 App 或项目")
+                    Text("查看历史卸载记录，并恢复仍在废纸篓中的项目")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -126,16 +126,13 @@ private struct DeletionListView: View {
             Divider()
 
             if store.deletedTrashBatches.isEmpty {
-                ContentUnavailableView("没有可恢复项目", systemImage: "trash", description: Text("通过 MacAppClean 移入废纸篓的项目会出现在这里。"))
+                ContentUnavailableView("没有删除记录", systemImage: "trash", description: Text("通过 MacAppClean 移入废纸篓的项目会出现在这里。"))
                     .frame(minHeight: 260)
             } else {
                 List {
                     ForEach(store.deletedTrashBatches) { batch in
                         DeletionBatchRow(batch: batch) {
                             store.restoreDeletedBatch(id: batch.id)
-                            if store.deletedTrashBatches.isEmpty {
-                                dismiss()
-                            }
                         }
                     }
                 }
@@ -171,6 +168,10 @@ private struct DeletionBatchRow: View {
                     Text(batch.formattedSize)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
+
+                    Text(batch.statusText)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(batch.canRestore ? .green : .secondary)
                 }
 
                 Text("\(batch.itemCount) 个项目 · \(batch.removedAt.formatted(date: .abbreviated, time: .shortened))")
@@ -193,6 +194,7 @@ private struct DeletionBatchRow: View {
                 Label("恢复", systemImage: "arrow.uturn.backward")
             }
             .buttonStyle(.borderedProminent)
+            .disabled(!batch.canRestore)
         }
         .padding(.vertical, 8)
     }

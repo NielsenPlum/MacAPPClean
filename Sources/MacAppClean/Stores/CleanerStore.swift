@@ -11,6 +11,7 @@ final class CleanerStore {
         var originalURL: URL
         var trashURL: URL
         var removedAt: Date
+        var restoredAt: Date?
         var size: Int64 = 0
 
         init(batchID: UUID, batchName: String, originalURL: URL, trashURL: URL, removedAt: Date, size: Int64) {
@@ -23,7 +24,7 @@ final class CleanerStore {
         }
 
         private enum CodingKeys: String, CodingKey {
-            case id, batchID, batchName, originalURL, trashURL, removedAt, size
+            case id, batchID, batchName, originalURL, trashURL, removedAt, restoredAt, size
         }
 
         init(from decoder: Decoder) throws {
@@ -34,7 +35,15 @@ final class CleanerStore {
             originalURL = try container.decode(URL.self, forKey: .originalURL)
             trashURL = try container.decode(URL.self, forKey: .trashURL)
             removedAt = try container.decodeIfPresent(Date.self, forKey: .removedAt) ?? Date()
+            restoredAt = try container.decodeIfPresent(Date.self, forKey: .restoredAt)
             size = try container.decodeIfPresent(Int64.self, forKey: .size) ?? 0
+        }
+
+        var isRestorable: Bool {
+            let fm = FileManager.default
+            return restoredAt == nil &&
+                fm.fileExists(atPath: trashURL.path) &&
+                !fm.fileExists(atPath: originalURL.path)
         }
     }
 
@@ -43,11 +52,34 @@ final class CleanerStore {
         var name: String
         var removedAt: Date
         var itemCount: Int
+        var restorableItemCount: Int
+        var restoredItemCount: Int
+        var blockedByExistingOriginalCount: Int
         var size: Int64
         var previewPaths: [String]
 
         var formattedSize: String {
             ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        }
+
+        var canRestore: Bool {
+            restorableItemCount > 0
+        }
+
+        var statusText: String {
+            if restorableItemCount == itemCount {
+                return "可恢复"
+            }
+            if restorableItemCount > 0 {
+                return "\(restorableItemCount) 项可恢复"
+            }
+            if restoredItemCount == itemCount {
+                return "已恢复"
+            }
+            if blockedByExistingOriginalCount == itemCount {
+                return "原位置已有项目"
+            }
+            return "仅保留记录"
         }
     }
 
@@ -98,19 +130,32 @@ final class CleanerStore {
     }
 
     var restorableTrashCount: Int {
-        recentTrashRecords.filter { FileManager.default.fileExists(atPath: $0.trashURL.path) }.count
+        recentTrashRecords.filter(\.isRestorable).count
+    }
+
+    var deletionHistoryCount: Int {
+        recentTrashRecords.count
     }
 
     var deletedTrashBatches: [DeletedTrashBatch] {
-        let availableRecords = recentTrashRecords.filter { FileManager.default.fileExists(atPath: $0.trashURL.path) }
-        let grouped = Dictionary(grouping: availableRecords, by: \.batchID)
+        let grouped = Dictionary(grouping: recentTrashRecords, by: \.batchID)
         return grouped.map { batchID, records in
             let sortedRecords = records.sorted { $0.removedAt < $1.removedAt }
+            let restorableCount = records.filter(\.isRestorable).count
+            let restoredCount = records.filter { $0.restoredAt != nil }.count
+            let blockedCount = records.filter {
+                $0.restoredAt == nil &&
+                    FileManager.default.fileExists(atPath: $0.trashURL.path) &&
+                    FileManager.default.fileExists(atPath: $0.originalURL.path)
+            }.count
             return DeletedTrashBatch(
                 id: batchID,
                 name: sortedRecords.first?.batchName ?? "已移除项目",
                 removedAt: sortedRecords.map(\.removedAt).max() ?? Date(),
                 itemCount: sortedRecords.count,
+                restorableItemCount: restorableCount,
+                restoredItemCount: restoredCount,
+                blockedByExistingOriginalCount: blockedCount,
                 size: sortedRecords.map(\.size).reduce(0, +),
                 previewPaths: Array(sortedRecords.map(\.originalURL.path).prefix(3))
             )
@@ -1006,7 +1051,7 @@ final class CleanerStore {
     }
 
     func restoreLastRemovedItems() {
-        guard let batch = deletedTrashBatches.first else {
+        guard let batch = deletedTrashBatches.first(where: \.canRestore) else {
             restoreErrorMessage = "没有可恢复的项目。只有通过 MacAppClean 移入废纸篓、且仍在废纸篓中的项目可以恢复。"
             return
         }
@@ -1014,29 +1059,32 @@ final class CleanerStore {
     }
 
     func restoreDeletedBatch(id batchID: UUID) {
-        let records = recentTrashRecords.filter { $0.batchID == batchID && FileManager.default.fileExists(atPath: $0.trashURL.path) }
+        let records = recentTrashRecords.filter { $0.batchID == batchID && $0.isRestorable }
         guard !records.isEmpty else {
-            restoreErrorMessage = "这个项目已经不在废纸篓中，无法恢复。"
-            recentTrashRecords.removeAll { $0.batchID == batchID }
+            restoreErrorMessage = "这个删除记录已经不可恢复；可能已经恢复、被清空废纸篓，或原位置已有同名项目。"
             saveRecentTrashRecords()
             return
         }
 
-        var restoredIDs = Set<TrashRecord.ID>()
+        var restoredIDs: [TrashRecord.ID: Date] = [:]
         var failures: [String] = []
 
         for record in records.reversed() {
             if restore(record, failures: &failures) {
-                restoredIDs.insert(record.id)
+                restoredIDs[record.id] = Date()
             }
         }
 
-        recentTrashRecords.removeAll { restoredIDs.contains($0.id) || !FileManager.default.fileExists(atPath: $0.trashURL.path) }
+        for index in recentTrashRecords.indices {
+            if let restoredAt = restoredIDs[recentTrashRecords[index].id] {
+                recentTrashRecords[index].restoredAt = restoredAt
+            }
+        }
         saveRecentTrashRecords()
 
         if failures.isEmpty {
             let name = records.first?.batchName ?? "项目"
-            lastScanSummary = "已从废纸篓恢复 \(name) 的 \(restoredIDs.count) 个项目。"
+            lastScanSummary = "已从废纸篓恢复 \(name) 的 \(restoredIDs.count) 个项目，删除记录已保留。"
         } else {
             let visibleFailures = failures.prefix(5).joined(separator: "\n")
             let remaining = failures.count > 5 ? "\n以及另外 \(failures.count - 5) 项。" : ""
@@ -1080,7 +1128,7 @@ final class CleanerStore {
     private func rememberTrashRecords(_ records: [TrashRecord]) {
         guard !records.isEmpty else { return }
         recentTrashRecords.append(contentsOf: records)
-        recentTrashRecords = Array(recentTrashRecords.suffix(200))
+        recentTrashRecords = Array(recentTrashRecords.suffix(500))
         saveRecentTrashRecords()
     }
 
@@ -1222,11 +1270,12 @@ final class CleanerStore {
               let records = try? JSONDecoder().decode([TrashRecord].self, from: data) else {
             return []
         }
-        return records.filter { FileManager.default.fileExists(atPath: $0.trashURL.path) }
+        return Array(records.suffix(500))
     }
 
     private func saveRecentTrashRecords() {
-        let records = recentTrashRecords.filter { FileManager.default.fileExists(atPath: $0.trashURL.path) }
+        recentTrashRecords = Array(recentTrashRecords.suffix(500))
+        let records = recentTrashRecords
         if let data = try? JSONEncoder().encode(records) {
             UserDefaults.standard.set(data, forKey: Self.trashRecordsKey)
         }
