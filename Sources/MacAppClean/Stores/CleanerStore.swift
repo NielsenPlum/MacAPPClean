@@ -250,31 +250,57 @@ final class CleanerStore {
 
     // MARK: - Directory Size Calculator
 
-    /// Recursively calculate total file size for a URL (works for both files and directories)
+    /// Recursively calculate real disk usage for a URL (works for both files and directories).
+    /// Sparse files can report a very large logical size, so prefer allocated bytes.
     private func directoryTotalSize(url: URL) -> Int64 {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
 
         if !isDir.boolValue {
-            return (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            return fileDiskUsage(url: url)
         }
 
-        // Directory: enumerate all regular files recursively
-        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey], options: [.skipsPackageDescendants, .skipsHiddenFiles]) else {
+        let keys: [URLResourceKey] = [
+            .isRegularFileKey,
+            .fileAllocatedSizeKey,
+            .totalFileAllocatedSizeKey,
+            .fileSizeKey,
+            .totalFileSizeKey,
+        ]
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: keys, options: [.skipsPackageDescendants, .skipsHiddenFiles]) else {
             return 0
         }
 
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                  values.isRegularFile == true,
-                  let fileSize = values.fileSize else {
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true else {
                 continue
             }
-            total += Int64(fileSize)
+            total += fileDiskUsage(url: fileURL)
         }
         return total
+    }
+
+    private func fileDiskUsage(url: URL) -> Int64 {
+        let keys: Set<URLResourceKey> = [
+            .fileAllocatedSizeKey,
+            .totalFileAllocatedSizeKey,
+            .fileSizeKey,
+            .totalFileSizeKey,
+        ]
+
+        if let values = try? url.resourceValues(forKeys: keys) {
+            if let allocatedSize = values.totalFileAllocatedSize ?? values.fileAllocatedSize {
+                return Int64(allocatedSize)
+            }
+            if let logicalSize = values.totalFileSize ?? values.fileSize {
+                return Int64(logicalSize)
+            }
+        }
+
+        return (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
     }
 
     // MARK: - App Info Cache
@@ -573,25 +599,33 @@ final class CleanerStore {
         for dir in dirsToScan {
             guard accessibleDirectoryPaths.contains(dir.path) else { continue }
 
+            let keys: [URLResourceKey] = [
+                .isRegularFileKey,
+                .contentModificationDateKey,
+                .fileAllocatedSizeKey,
+                .totalFileAllocatedSizeKey,
+                .fileSizeKey,
+                .totalFileSizeKey,
+            ]
             guard fm.fileExists(atPath: dir.path),
-                  let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey], options: [.skipsPackageDescendants, .skipsHiddenFiles]) else {
+                  let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: keys, options: [.skipsPackageDescendants, .skipsHiddenFiles]) else {
                 continue
             }
 
             var largeFiles: [ScannedFile] = []
 
             while let fileURL = enumerator.nextObject() as? URL {
-                guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+                guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
                       values.isRegularFile == true,
-                      let fileSize = values.fileSize,
-                      fileSize > 100_000_000 else {
+                      fileDiskUsage(url: fileURL) > 100_000_000 else {
                     continue
                 }
 
+                let fileSize = fileDiskUsage(url: fileURL)
                 let modDate = values.contentModificationDate ?? Date()
                 largeFiles.append(ScannedFile(
                     url: fileURL,
-                    size: Int64(fileSize),
+                    size: fileSize,
                     isDirectory: false,
                     modDate: modDate,
                     category: .largeFile
