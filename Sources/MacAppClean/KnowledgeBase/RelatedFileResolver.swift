@@ -3,10 +3,16 @@ import Foundation
 final class RelatedFileResolver {
     private let knowledgeBase: KnowledgeBaseSnapshot
     private let fileManager: FileManager
+    private let homeDirectory: URL
 
-    init(knowledgeBase: KnowledgeBaseSnapshot, fileManager: FileManager = .default) {
+    init(
+        knowledgeBase: KnowledgeBaseSnapshot,
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil
+    ) {
         self.knowledgeBase = knowledgeBase
         self.fileManager = fileManager
+        self.homeDirectory = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
     }
 
     func resolveCandidates(for identity: AppIdentity) -> [RelatedFileCandidate] {
@@ -90,7 +96,7 @@ final class RelatedFileResolver {
     }
 
     private func appendSteamDynamicCandidates(identity: AppIdentity, to candidates: inout [RelatedFileCandidate]) {
-        let home = fileManager.homeDirectoryForCurrentUser
+        let home = homeDirectory
         let defaultSteamApps = home.appending(path: "Library/Application Support/Steam/steamapps")
 
         for library in steamLibraryFolders(defaultSteamApps: defaultSteamApps) {
@@ -175,7 +181,7 @@ final class RelatedFileResolver {
     }
 
     private func expand(template: String, identity: AppIdentity) -> URL? {
-        let home = fileManager.homeDirectoryForCurrentUser.path
+        let home = homeDirectory.path
         let bundleID = identity.bundleID ?? ""
         let appName = identity.appURL.deletingPathExtension().lastPathComponent
 

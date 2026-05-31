@@ -15,6 +15,10 @@ let package = Package(
             name: "MacAppClean",
             path: "Sources/MacAppClean",
             exclude: ["Resources", "Assets.xcassets"]
+        ),
+        .testTarget(
+            name: "MacAppCleanTests",
+            dependencies: ["MacAppClean"]
         )
     ]
 )
