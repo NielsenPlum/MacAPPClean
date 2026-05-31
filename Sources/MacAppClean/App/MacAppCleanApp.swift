@@ -22,6 +22,12 @@ struct MacAppCleanApp: App {
                 .keyboardShortcut(.delete, modifiers: [.command])
                 .disabled(store.selectedCount == 0)
 
+                Button("恢复上次移除") {
+                    store.restoreLastRemovedItems()
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(store.restorableTrashCount == 0)
+
                 Divider()
             }
 

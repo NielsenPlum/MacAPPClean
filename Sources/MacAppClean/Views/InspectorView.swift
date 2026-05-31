@@ -61,7 +61,8 @@ private struct AppUninstallDetailView: View {
                 size: appSize,
                 isDirectory: true,
                 category: .app,
-                version: item.version
+                version: item.version,
+                defaultSelected: true
             ))
         }
 
@@ -71,7 +72,8 @@ private struct AppUninstallDetailView: View {
                 size: file.size,
                 isDirectory: file.isDirectory,
                 category: file.category,
-                version: nil
+                version: nil,
+                defaultSelected: file.defaultSelected
             )
         }
 
@@ -132,15 +134,19 @@ private struct AppUninstallDetailView: View {
                 onSelectAll: selectAllEntries
             )
         }
-        .onAppear(perform: selectAllEntries)
+        .onAppear(perform: selectDefaultEntries)
         .onChange(of: item.id) { _, _ in
-            selectAllEntries()
+            selectDefaultEntries()
             expandedCategories = Set(ScannedFile.FileCategory.allCases)
         }
     }
 
     private func selectAllEntries() {
         selectedPaths = Set(uninstallEntries.map { $0.url.path })
+    }
+
+    private func selectDefaultEntries() {
+        selectedPaths = Set(uninstallEntries.filter(\.defaultSelected).map { $0.url.path })
     }
 
     private func toggleAllEntries() {
@@ -472,6 +478,7 @@ private struct UninstallEntry: Identifiable, Hashable {
     var isDirectory: Bool
     var category: ScannedFile.FileCategory
     var version: String?
+    var defaultSelected: Bool
 
     var displayLocation: String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -754,13 +761,29 @@ private struct FileLine: View {
                 .font(.caption)
                 .foregroundStyle(file.category == .cache ? .orange : .secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(file.url.lastPathComponent)
-                    .font(.caption)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(file.url.lastPathComponent)
+                        .font(.caption)
+                        .lineLimit(1)
+
+                    Text(file.risk.displayName)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(riskColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(riskColor.opacity(0.12), in: Capsule())
+                }
                 Text(file.url.deletingLastPathComponent().lastPathComponent)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
+
+                if let match = file.matchedBy.first {
+                    Text(match)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer()
             Text(file.sizeFormatted)
@@ -768,6 +791,14 @@ private struct FileLine: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
+    }
+
+    private var riskColor: Color {
+        switch file.risk {
+        case .low: .green
+        case .medium: .orange
+        case .high: .red
+        }
     }
 }
 

@@ -5,6 +5,7 @@ MODE="${1:-run}"
 APP_NAME="MacAppClean"
 BUNDLE_ID="com.local.MacAppClean"
 MIN_SYSTEM_VERSION="14.0"
+CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:-}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -14,6 +15,11 @@ APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+
+if [ -z "$CODE_SIGN_IDENTITY" ]; then
+  CODE_SIGN_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning | /usr/bin/awk -F '"' '/"Apple Development|Developer ID Application|Mac Developer/ { print $2; exit }')"
+fi
+CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
@@ -57,9 +63,17 @@ cat >"$INFO_PLIST" <<PLIST
   <string>NSApplication</string>
   <key>NSSupportsAutomaticTermination</key>
   <true/>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>MacAppClean 需要扫描桌面中的大文件，帮助你发现可清理项目。</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>MacAppClean 需要扫描文稿中的大文件，帮助你发现可清理项目。</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>MacAppClean 需要扫描下载中的大文件，帮助你发现可清理项目。</string>
 </dict>
 </plist>
 PLIST
+
+/usr/bin/codesign --force --deep --sign "$CODE_SIGN_IDENTITY" "$APP_BUNDLE"
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

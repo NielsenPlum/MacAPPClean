@@ -58,6 +58,9 @@ struct ScannedFile: Identifiable, Hashable {
     let isDirectory: Bool
     let modDate: Date
     var category: FileCategory
+    var matchedBy: [String] = []
+    var risk: RelatedFileRisk = .medium
+    var defaultSelected: Bool = true
 
     var sizeFormatted: String {
         ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
@@ -71,6 +74,8 @@ struct ScannedFile: Identifiable, Hashable {
         case log = "日志"
         case launchAgent = "启动代理"
         case extensionFile = "扩展"
+        case gameContent = "游戏内容"
+        case userData = "用户数据"
         case leftover = "残留"
         case largeFile = "大文件"
         case other = "其他"
@@ -84,6 +89,8 @@ struct ScannedFile: Identifiable, Hashable {
             case .log: "日志"
             case .launchAgent: "启动代理"
             case .extensionFile: "扩展"
+            case .gameContent: "游戏库内容"
+            case .userData: "用户数据与截图"
             case .leftover: "残留文件"
             case .largeFile: "大文件"
             case .other: "其他"
@@ -91,7 +98,7 @@ struct ScannedFile: Identifiable, Hashable {
         }
 
         static var uninstallOrder: [ScannedFile.FileCategory] {
-            [.app, .support, .cache, .preferences, .log, .launchAgent, .extensionFile, .leftover, .largeFile, .other]
+            [.app, .gameContent, .userData, .support, .cache, .preferences, .log, .launchAgent, .extensionFile, .leftover, .largeFile, .other]
         }
     }
 }

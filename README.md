@@ -35,3 +35,37 @@
 # 查看日志
 ./script/build_and_run.sh --logs
 ```
+
+## 知识库规则格式
+
+设置页可以配置一个 HTTPS 远端规则源。MacAppClean 只下载规则 JSON，不上传本机应用列表。
+
+```json
+{
+  "version": "2026.05.31",
+  "rules": [
+    {
+      "id": "com.example.App",
+      "name": "Example App",
+      "match": {
+        "bundleIDs": ["com.example.App"],
+        "names": ["Example App"]
+      },
+      "paths": [
+        {
+          "template": "$APP_SUPPORT/Example App",
+          "category": "support",
+          "risk": "medium",
+          "defaultSelected": true
+        }
+      ],
+      "update": {
+        "homebrewCaskToken": "example-app",
+        "appStoreCountry": "US"
+      }
+    }
+  ]
+}
+```
+
+支持的模板变量：`~`、`$HOME`、`$APP_NAME`、`$BUNDLE_ID`、`$APP_SUPPORT`、`$CACHES`、`$PREFERENCES`。

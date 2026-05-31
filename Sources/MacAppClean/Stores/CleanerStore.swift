@@ -1,8 +1,62 @@
+import AppKit
 import Foundation
 import Observation
 
 @Observable
 final class CleanerStore {
+    private struct TrashRecord: Codable, Identifiable, Hashable {
+        var id = UUID()
+        var batchID = UUID()
+        var batchName = "已移除项目"
+        var originalURL: URL
+        var trashURL: URL
+        var removedAt: Date
+        var size: Int64 = 0
+
+        init(batchID: UUID, batchName: String, originalURL: URL, trashURL: URL, removedAt: Date, size: Int64) {
+            self.batchID = batchID
+            self.batchName = batchName
+            self.originalURL = originalURL
+            self.trashURL = trashURL
+            self.removedAt = removedAt
+            self.size = size
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id, batchID, batchName, originalURL, trashURL, removedAt, size
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+            batchID = try container.decodeIfPresent(UUID.self, forKey: .batchID) ?? UUID()
+            batchName = try container.decodeIfPresent(String.self, forKey: .batchName) ?? "已移除项目"
+            originalURL = try container.decode(URL.self, forKey: .originalURL)
+            trashURL = try container.decode(URL.self, forKey: .trashURL)
+            removedAt = try container.decodeIfPresent(Date.self, forKey: .removedAt) ?? Date()
+            size = try container.decodeIfPresent(Int64.self, forKey: .size) ?? 0
+        }
+    }
+
+    struct DeletedTrashBatch: Identifiable, Hashable {
+        var id: UUID
+        var name: String
+        var removedAt: Date
+        var itemCount: Int
+        var size: Int64
+        var previewPaths: [String]
+
+        var formattedSize: String {
+            ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        }
+    }
+
+    private struct InstalledAppIndex {
+        var bundleIDs: Set<String> = []
+        var names: Set<String> = []
+        var vendorTokens: Set<String> = []
+    }
+
     enum SortMode: String, CaseIterable {
         case sizeDesc = "按大小从大到小"
         case sizeAsc = "按大小从小到大"
@@ -33,6 +87,36 @@ final class CleanerStore {
     var isScanning = false
     var lastScanSummary = "准备扫描应用程序、资源库、登录项和扩展文件夹。"
     var scanProgress: String = ""
+    var cleanupErrorMessage: String?
+    var scanAccessMessage: String?
+    var restoreErrorMessage: String?
+    private var recentTrashRecords: [TrashRecord] = []
+    private static let trashRecordsKey = "MacAppClean.recentTrashRecords"
+
+    init() {
+        recentTrashRecords = Self.loadRecentTrashRecords()
+    }
+
+    var restorableTrashCount: Int {
+        recentTrashRecords.filter { FileManager.default.fileExists(atPath: $0.trashURL.path) }.count
+    }
+
+    var deletedTrashBatches: [DeletedTrashBatch] {
+        let availableRecords = recentTrashRecords.filter { FileManager.default.fileExists(atPath: $0.trashURL.path) }
+        let grouped = Dictionary(grouping: availableRecords, by: \.batchID)
+        return grouped.map { batchID, records in
+            let sortedRecords = records.sorted { $0.removedAt < $1.removedAt }
+            return DeletedTrashBatch(
+                id: batchID,
+                name: sortedRecords.first?.batchName ?? "已移除项目",
+                removedAt: sortedRecords.map(\.removedAt).max() ?? Date(),
+                itemCount: sortedRecords.count,
+                size: sortedRecords.map(\.size).reduce(0, +),
+                previewPaths: Array(sortedRecords.map(\.originalURL.path).prefix(3))
+            )
+        }
+        .sorted { $0.removedAt > $1.removedAt }
+    }
 
     var visibleItems: [CleanerItem] {
         items
@@ -88,16 +172,18 @@ final class CleanerStore {
         isScanning = true
         items = []
         selectedItemID = nil
-        scanProgress = "正在扫描应用文件夹..."
+        scanProgress = "正在申请文件夹访问权限..."
         lastScanSummary = "正在扫描应用包、缓存、偏好设置、启动代理和浏览器扩展..."
 
         Task { @MainActor in
             var scanned: [CleanerItem] = []
+            let folderAccess = requestProtectedFolderAccessForScan()
+            let knowledgeBase = await KnowledgeBaseProvider().loadKnowledgeBase()
 
             scanProgress = "正在扫描 /Applications..."
             var seenAppPaths = Set<String>()
-            scanned += await scanApplicationsDirectory(url: URL(fileURLWithPath: "/Applications"), seenPaths: &seenAppPaths)
-            scanned += await scanApplicationsDirectory(url: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Applications"), seenPaths: &seenAppPaths)
+            scanned += await scanApplicationsDirectory(url: URL(fileURLWithPath: "/Applications"), seenPaths: &seenAppPaths, knowledgeBase: knowledgeBase)
+            scanned += await scanApplicationsDirectory(url: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Applications"), seenPaths: &seenAppPaths, knowledgeBase: knowledgeBase)
 
             scanProgress = "正在扫描启动项..."
             scanned += await scanStartupPrograms()
@@ -109,13 +195,13 @@ final class CleanerStore {
             scanned += await scanLeftovers()
 
             scanProgress = "正在扫描大文件..."
-            scanned += await scanLargeFiles()
+            scanned += await scanLargeFiles(accessibleDirectoryPaths: folderAccess.accessiblePaths)
 
             scanProgress = "正在检查安全状态..."
             scanned = await scanSecurity(items: scanned)
 
             scanProgress = "正在检查更新..."
-            scanned = await checkUpdates(items: scanned)
+            scanned = await checkUpdates(items: scanned, knowledgeBase: knowledgeBase)
 
             scanned = deduplicatedItems(scanned)
 
@@ -124,7 +210,42 @@ final class CleanerStore {
             self.isScanning = false
             self.scanProgress = ""
             self.lastScanSummary = "扫描完成。在 \(CleanerSection.allCases.count) 个分类中共发现 \(scanned.count) 个项目，预估可释放 \(ByteCountFormatter.string(fromByteCount: totalRecoverable, countStyle: .file))。"
+            if !folderAccess.deniedNames.isEmpty {
+                self.scanAccessMessage = "以下文件夹没有授权，本次已跳过对应的大文件扫描：\(folderAccess.deniedNames.joined(separator: "、"))。\n\n如需以后不再反复确认，请在系统设置 > 隐私与安全性 > 文件和文件夹中允许 MacAppClean 访问这些目录；本地开发构建还需要保持稳定签名。"
+            }
         }
+    }
+
+    private func requestProtectedFolderAccessForScan() -> (accessiblePaths: Set<String>, deniedNames: [String]) {
+        let fm = FileManager.default
+        var accessiblePaths = Set<String>()
+        var deniedNames: [String] = []
+
+        for folder in protectedScanFolders() {
+            guard fm.fileExists(atPath: folder.url.path) else { continue }
+
+            do {
+                _ = try fm.contentsOfDirectory(
+                    at: folder.url,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                )
+                accessiblePaths.insert(folder.url.path)
+            } catch {
+                deniedNames.append(folder.name)
+            }
+        }
+
+        return (accessiblePaths, deniedNames)
+    }
+
+    private func protectedScanFolders() -> [(name: String, url: URL)] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            ("下载", home.appending(path: "Downloads")),
+            ("桌面", home.appending(path: "Desktop")),
+            ("文稿", home.appending(path: "Documents")),
+        ]
     }
 
     // MARK: - Directory Size Calculator
@@ -193,7 +314,7 @@ final class CleanerStore {
 
     // MARK: - Application Scanner
 
-    private func scanApplicationsDirectory(url: URL, seenPaths: inout Set<String>) async -> [CleanerItem] {
+    private func scanApplicationsDirectory(url: URL, seenPaths: inout Set<String>, knowledgeBase: KnowledgeBaseSnapshot) async -> [CleanerItem] {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return [] }
 
@@ -219,7 +340,7 @@ final class CleanerStore {
 
                         let name = (try? resolved.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? resolved.deletingPathExtension().lastPathComponent
                         let (version, lastUsed, developer) = getAppInfo(at: resolved)
-                        let relatedFiles = findRelatedFiles(for: resolved)
+                        let relatedFiles = findRelatedFiles(for: resolved, knowledgeBase: knowledgeBase)
                         let appSize = directoryTotalSize(url: resolved)
                         let totalSize = appSize + relatedFiles.map(\.size).reduce(0, +)
 
@@ -251,45 +372,36 @@ final class CleanerStore {
         return results
     }
 
-    private func findRelatedFiles(for appURL: URL) -> [ScannedFile] {
+    private func findRelatedFiles(for appURL: URL, knowledgeBase: KnowledgeBaseSnapshot) -> [ScannedFile] {
         var files: [ScannedFile] = []
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
+        let identity = AppIdentity(appURL: appURL)
+        let resolver = RelatedFileResolver(knowledgeBase: knowledgeBase)
 
-        guard let bundleID = Bundle(url: appURL)?.bundleIdentifier else { return files }
-        let appName = appURL.deletingPathExtension().lastPathComponent
-
-        let libraryPaths: [(String, ScannedFile.FileCategory)] = [
-            ("Library/Application Support/\(appName)", .support),
-            ("Library/Application Support/\(bundleID)", .support),
-            ("Library/Caches/\(bundleID)", .cache),
-            ("Library/Caches/\(appName)", .cache),
-            ("Library/Preferences/\(bundleID).plist", .preferences),
-            ("Library/Logs/\(appName)", .log),
-            ("Library/WebKit/\(bundleID)", .cache),
-            ("Library/Saved Application State/\(bundleID).savedState", .support),
-            ("Library/Containers/\(bundleID)", .support),
-            ("Library/Group Containers/\(bundleID)", .support),
-        ]
-
-        for (relativePath, category) in libraryPaths {
-            let pathURL = home.appending(path: relativePath)
-            if fm.fileExists(atPath: pathURL.path) {
-                var isDir: ObjCBool = false
-                fm.fileExists(atPath: pathURL.path, isDirectory: &isDir)
-                let dirSize = directoryTotalSize(url: pathURL)
-                let modDate = (try? pathURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
-                files.append(ScannedFile(
-                    url: pathURL,
-                    size: dirSize,
-                    isDirectory: isDir.boolValue,
-                    modDate: modDate,
-                    category: category
-                ))
-            }
+        for candidate in resolver.resolveCandidates(for: identity) {
+            appendRelatedFile(candidate, to: &files)
         }
 
         return files
+    }
+
+    private func appendRelatedFile(_ candidate: RelatedFileCandidate, to files: inout [ScannedFile]) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: candidate.url.path) else { return }
+
+        var isDir: ObjCBool = false
+        fm.fileExists(atPath: candidate.url.path, isDirectory: &isDir)
+        let size = directoryTotalSize(url: candidate.url)
+        let modDate = (try? candidate.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+        files.append(ScannedFile(
+            url: candidate.url,
+            size: size,
+            isDirectory: isDir.boolValue,
+            modDate: modDate,
+            category: candidate.category,
+            matchedBy: candidate.matchedBy,
+            risk: candidate.risk,
+            defaultSelected: candidate.defaultSelected
+        ))
     }
 
     // MARK: - Startup Programs Scanner
@@ -394,7 +506,7 @@ final class CleanerStore {
         let home = fm.homeDirectoryForCurrentUser
         var results: [CleanerItem] = []
 
-        let installedBundleIDs = installedAppBundleIDs()
+        let installedApps = installedAppIndex()
 
         let libraryDirs = [
             home.appending(path: "Library/Application Support"),
@@ -416,7 +528,7 @@ final class CleanerStore {
                 let itemName = item.lastPathComponent
                 let possibleBundleID = itemName.replacingOccurrences(of: ".plist", with: "")
                     .replacingOccurrences(of: ".savedState", with: "")
-                if installedBundleIDs.contains(possibleBundleID) { continue }
+                if shouldIgnoreLeftoverArtifact(possibleBundleID, installedApps: installedApps) { continue }
                 if possibleBundleID.hasPrefix("com.apple.") { continue }
 
                 let itemSize = directoryTotalSize(url: item)
@@ -447,7 +559,7 @@ final class CleanerStore {
 
     // MARK: - Large Files Scanner
 
-    private func scanLargeFiles() async -> [CleanerItem] {
+    private func scanLargeFiles(accessibleDirectoryPaths: Set<String>) async -> [CleanerItem] {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         var results: [CleanerItem] = []
@@ -459,6 +571,8 @@ final class CleanerStore {
         let dirsToScan = [downloadURL, desktopURL, documentsURL]
 
         for dir in dirsToScan {
+            guard accessibleDirectoryPaths.contains(dir.path) else { continue }
+
             guard fm.fileExists(atPath: dir.path),
                   let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey], options: [.skipsPackageDescendants, .skipsHiddenFiles]) else {
                 continue
@@ -571,8 +685,8 @@ final class CleanerStore {
 
     // MARK: - Update Checker (stub)
 
-    private func checkUpdates(items: [CleanerItem]) async -> [CleanerItem] {
-        return items
+    private func checkUpdates(items: [CleanerItem], knowledgeBase: KnowledgeBaseSnapshot) async -> [CleanerItem] {
+        await AppUpdateChecker(knowledgeBase: knowledgeBase).checkUpdates(for: items)
     }
 
     // MARK: - Helpers
@@ -608,23 +722,110 @@ final class CleanerStore {
         return "\(item.section.rawValue):\(item.name):\(item.developer)"
     }
 
-    private func installedAppBundleIDs() -> Set<String> {
-        var ids = Set<String>()
+    private func installedAppIndex() -> InstalledAppIndex {
+        var index = InstalledAppIndex()
         let fm = FileManager.default
 
         for appDir in [URL(fileURLWithPath: "/Applications"), fm.homeDirectoryForCurrentUser.appending(path: "Applications")] {
-            guard fm.fileExists(atPath: appDir.path),
-                  let apps = try? fm.contentsOfDirectory(at: appDir, includingPropertiesForKeys: [], options: .skipsHiddenFiles) else {
-                continue
-            }
-            for app in apps where app.pathExtension == "app" {
-                if let bundleID = Bundle(url: app)?.bundleIdentifier {
-                    ids.insert(bundleID)
+            guard fm.fileExists(atPath: appDir.path) else { continue }
+
+            var dirsToScan = [appDir]
+            while !dirsToScan.isEmpty {
+                let dir = dirsToScan.removeFirst()
+                guard let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else {
+                    continue
+                }
+
+                for url in contents {
+                    var isDir: ObjCBool = false
+                    guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
+
+                    if url.pathExtension == "app" {
+                        addInstalledApp(url, to: &index)
+                    } else {
+                        dirsToScan.append(url)
+                    }
                 }
             }
         }
 
-        return ids
+        return index
+    }
+
+    private func addInstalledApp(_ url: URL, to index: inout InstalledAppIndex) {
+        let appName = url.deletingPathExtension().lastPathComponent
+        index.names.insert(normalizedArtifactName(appName))
+
+        guard let bundle = Bundle(url: url) else { return }
+
+        if let bundleID = bundle.bundleIdentifier {
+            let normalizedBundleID = bundleID.lowercased()
+            index.bundleIDs.insert(normalizedBundleID)
+            index.vendorTokens.formUnion(bundleVendorTokens(from: normalizedBundleID))
+        }
+
+        for key in ["CFBundleName", "CFBundleDisplayName", "CFBundleExecutable"] {
+            if let value = bundle.infoDictionary?[key] as? String, !value.isEmpty {
+                index.names.insert(normalizedArtifactName(value))
+            }
+        }
+    }
+
+    private func isInstalledAppArtifact(_ artifactName: String, installedApps: InstalledAppIndex) -> Bool {
+        let normalizedName = normalizedArtifactName(artifactName)
+        if installedApps.names.contains(normalizedName) { return true }
+        if installedApps.vendorTokens.contains(normalizedName) { return true }
+
+        let bundleLikeName = artifactName.lowercased()
+        return installedApps.bundleIDs.contains { bundleID in
+            bundleLikeName == bundleID ||
+            bundleLikeName.hasPrefix("\(bundleID).") ||
+            bundleID.hasPrefix("\(bundleLikeName).")
+        }
+    }
+
+    private func shouldIgnoreLeftoverArtifact(_ artifactName: String, installedApps: InstalledAppIndex) -> Bool {
+        let normalizedName = normalizedArtifactName(artifactName)
+        if ignoredLeftoverArtifactNames.contains(normalizedName) { return true }
+        return isInstalledAppArtifact(artifactName, installedApps: installedApps)
+    }
+
+    private var ignoredLeftoverArtifactNames: Set<String> {
+        [
+            "pip",
+            "python",
+            "python3",
+            "node",
+            "npm",
+            "npx",
+            "yarn",
+            "pnpm",
+            "cargo",
+            "rustup",
+            "go",
+            "gradle",
+            "maven",
+            "homebrew"
+        ]
+    }
+
+    private func bundleVendorTokens(from bundleID: String) -> Set<String> {
+        let ignoredTokens: Set<String> = ["com", "org", "net", "io", "app", "apps", "mac", "macos", "os", "desktop"]
+        return Set(bundleID
+            .split(separator: ".")
+            .map { normalizedArtifactName(String($0)) }
+            .filter { $0.count >= 3 && !ignoredTokens.contains($0) })
+    }
+
+    private func normalizedArtifactName(_ name: String) -> String {
+        name
+            .replacingOccurrences(of: ".plist", with: "")
+            .replacingOccurrences(of: ".savedState", with: "")
+            .replacingOccurrences(of: ".app", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: " ", with: "")
+            .lowercased()
     }
 
     private func appIcon(for url: URL) -> String {
@@ -690,44 +891,323 @@ final class CleanerStore {
     }
 
     func removeSelected() {
-        let selectedIDs = Set(items.filter(\.isSelected).map(\.id))
-        let fm = FileManager.default
+        var removedIDs = Set<CleanerItem.ID>()
+        var failures: [String] = []
+        var trashRecords: [TrashRecord] = []
 
         for item in items where item.isSelected {
-            if let appURL = item.appURL, fm.fileExists(atPath: appURL.path) {
-                try? fm.trashItem(at: appURL, resultingItemURL: nil)
+            var itemFailed = false
+            let batchID = UUID()
+            let batchName = item.name
+
+            if let appURL = item.appURL {
+                if !trashIfNeeded(appURL, failures: &failures, records: &trashRecords, batchID: batchID, batchName: batchName) {
+                    itemFailed = true
+                    continue
+                }
             }
-            for file in item.files where fm.fileExists(atPath: file.url.path) {
-                try? fm.trashItem(at: file.url, resultingItemURL: nil)
+
+            for file in item.files {
+                if !trashIfNeeded(file.url, failures: &failures, records: &trashRecords, batchID: batchID, batchName: batchName) {
+                    itemFailed = true
+                }
+            }
+
+            if !itemFailed {
+                removedIDs.insert(item.id)
             }
         }
 
-        items.removeAll { selectedIDs.contains($0.id) }
-        selectedItemID = nil
+        items.removeAll { removedIDs.contains($0.id) }
+        if selectedItemID.map({ removedIDs.contains($0) }) == true {
+            selectedItemID = nil
+        }
+        rememberTrashRecords(trashRecords)
+        publishCleanupFailures(failures)
     }
 
     func remove(item: CleanerItem, filePaths: Set<String>) {
         guard !filePaths.isEmpty else { return }
 
-        let fm = FileManager.default
-        if let appURL = item.appURL, filePaths.contains(appURL.path), fm.fileExists(atPath: appURL.path) {
-            try? fm.trashItem(at: appURL, resultingItemURL: nil)
+        var failures: [String] = []
+        var removedPaths = Set<String>()
+        var trashRecords: [TrashRecord] = []
+        let batchID = UUID()
+        let batchName = item.name
+
+        if let appURL = item.appURL, filePaths.contains(appURL.path) {
+            if trashIfNeeded(appURL, failures: &failures, records: &trashRecords, batchID: batchID, batchName: batchName) {
+                removedPaths.insert(appURL.path)
+            } else {
+                rememberTrashRecords(trashRecords)
+                publishCleanupFailures(failures)
+                return
+            }
         }
 
-        for file in item.files where filePaths.contains(file.url.path) && fm.fileExists(atPath: file.url.path) {
-            try? fm.trashItem(at: file.url, resultingItemURL: nil)
+        for file in item.files where filePaths.contains(file.url.path) {
+            if trashIfNeeded(file.url, failures: &failures, records: &trashRecords, batchID: batchID, batchName: batchName) {
+                removedPaths.insert(file.url.path)
+            }
         }
 
         if let index = items.firstIndex(where: { $0.id == item.id }) {
-            let appWasRemoved = item.appURL.map { filePaths.contains($0.path) } ?? false
+            let appWasRemoved = item.appURL.map { removedPaths.contains($0.path) } ?? false
             if appWasRemoved || filePaths.count >= item.files.count + (item.appURL == nil ? 0 : 1) {
-                items.remove(at: index)
-                selectedItemID = nil
+                if failures.isEmpty {
+                    items.remove(at: index)
+                    selectedItemID = nil
+                } else {
+                    items[index].files.removeAll { removedPaths.contains($0.url.path) }
+                    items[index].size = max(0, items[index].size - item.files.filter { removedPaths.contains($0.url.path) }.map(\.size).reduce(0, +))
+                }
             } else {
-                items[index].files.removeAll { filePaths.contains($0.url.path) }
-                items[index].size = max(0, items[index].size - item.files.filter { filePaths.contains($0.url.path) }.map(\.size).reduce(0, +))
+                items[index].files.removeAll { removedPaths.contains($0.url.path) }
+                items[index].size = max(0, items[index].size - item.files.filter { removedPaths.contains($0.url.path) }.map(\.size).reduce(0, +))
             }
         }
+
+        rememberTrashRecords(trashRecords)
+        publishCleanupFailures(failures)
+    }
+
+    func restoreLastRemovedItems() {
+        guard let batch = deletedTrashBatches.first else {
+            restoreErrorMessage = "没有可恢复的项目。只有通过 MacAppClean 移入废纸篓、且仍在废纸篓中的项目可以恢复。"
+            return
+        }
+        restoreDeletedBatch(id: batch.id)
+    }
+
+    func restoreDeletedBatch(id batchID: UUID) {
+        let records = recentTrashRecords.filter { $0.batchID == batchID && FileManager.default.fileExists(atPath: $0.trashURL.path) }
+        guard !records.isEmpty else {
+            restoreErrorMessage = "这个项目已经不在废纸篓中，无法恢复。"
+            recentTrashRecords.removeAll { $0.batchID == batchID }
+            saveRecentTrashRecords()
+            return
+        }
+
+        var restoredIDs = Set<TrashRecord.ID>()
+        var failures: [String] = []
+
+        for record in records.reversed() {
+            if restore(record, failures: &failures) {
+                restoredIDs.insert(record.id)
+            }
+        }
+
+        recentTrashRecords.removeAll { restoredIDs.contains($0.id) || !FileManager.default.fileExists(atPath: $0.trashURL.path) }
+        saveRecentTrashRecords()
+
+        if failures.isEmpty {
+            let name = records.first?.batchName ?? "项目"
+            lastScanSummary = "已从废纸篓恢复 \(name) 的 \(restoredIDs.count) 个项目。"
+        } else {
+            let visibleFailures = failures.prefix(5).joined(separator: "\n")
+            let remaining = failures.count > 5 ? "\n以及另外 \(failures.count - 5) 项。" : ""
+            restoreErrorMessage = "以下项目未能恢复：\n\(visibleFailures)\(remaining)"
+        }
+    }
+
+    private func trashIfNeeded(_ url: URL, failures: inout [String], records: inout [TrashRecord], batchID: UUID, batchName: String) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return true }
+        let removedSize = directoryTotalSize(url: url)
+
+        guard quitRunningAppIfNeeded(at: url, failures: &failures) else { return false }
+
+        if let preflightFailure = trashPreflightFailure(for: url) {
+            failures.append(preflightFailure)
+            return false
+        }
+
+        do {
+            var resultingTrashURL: NSURL?
+            try fm.trashItem(at: url, resultingItemURL: &resultingTrashURL)
+            guard !fm.fileExists(atPath: url.path) else { return false }
+            if let trashURL = resultingTrashURL as URL? {
+                records.append(TrashRecord(batchID: batchID, batchName: batchName, originalURL: url, trashURL: trashURL, removedAt: Date(), size: removedSize))
+            }
+            return true
+        } catch {
+            if trashUsingFinder(url) {
+                if let trashURL = findTrashItem(named: url.lastPathComponent, removedAfter: Date().addingTimeInterval(-10)) {
+                    records.append(TrashRecord(batchID: batchID, batchName: batchName, originalURL: url, trashURL: trashURL, removedAt: Date(), size: removedSize))
+                }
+                return true
+            }
+
+            failures.append("\(failureLabel(for: url))：\(error.localizedDescription)\(trashPermissionHint(for: url))。已尝试通过 Finder 授权移除，但系统仍拒绝。")
+            return false
+        }
+    }
+
+    private func rememberTrashRecords(_ records: [TrashRecord]) {
+        guard !records.isEmpty else { return }
+        recentTrashRecords.append(contentsOf: records)
+        recentTrashRecords = Array(recentTrashRecords.suffix(200))
+        saveRecentTrashRecords()
+    }
+
+    private func restore(_ record: TrashRecord, failures: inout [String]) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: record.trashURL.path) else { return true }
+
+        if fm.fileExists(atPath: record.originalURL.path) {
+            failures.append("\(record.originalURL.lastPathComponent)：原位置已有同名项目，未覆盖。")
+            return false
+        }
+
+        do {
+            try fm.createDirectory(at: record.originalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.moveItem(at: record.trashURL, to: record.originalURL)
+            saveRecentTrashRecords()
+            return fm.fileExists(atPath: record.originalURL.path)
+        } catch {
+            if restoreUsingFinder(record.trashURL), fm.fileExists(atPath: record.originalURL.path) {
+                saveRecentTrashRecords()
+                return true
+            }
+            failures.append("\(record.originalURL.lastPathComponent)：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func trashPreflightFailure(for url: URL) -> String? {
+        let parentURL = url.deletingLastPathComponent()
+        if !FileManager.default.isWritableFile(atPath: parentURL.path) {
+            return "\(failureLabel(for: url))：没有写入 \(parentURL.path) 的权限，可能需要管理员授权。"
+        }
+
+        return nil
+    }
+
+    private func quitRunningAppIfNeeded(at url: URL, failures: inout [String]) -> Bool {
+        guard url.pathExtension == "app",
+              let bundleID = Bundle(url: url)?.bundleIdentifier else {
+            return true
+        }
+
+        var runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        guard !runningApps.isEmpty else { return true }
+
+        for app in runningApps {
+            app.terminate()
+        }
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            if runningApps.isEmpty {
+                return true
+            }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
+
+        failures.append("\(failureLabel(for: url))：应用仍在运行，已请求退出但未成功，请手动退出后再移除。")
+        return false
+    }
+
+    private func trashPermissionHint(for url: URL) -> String {
+        let parentURL = url.deletingLastPathComponent()
+        if !FileManager.default.isWritableFile(atPath: parentURL.path) {
+            return "。\(parentURL.path) 不可写，可能需要管理员授权。"
+        }
+        return ""
+    }
+
+    private func trashUsingFinder(_ url: URL) -> Bool {
+        let escapedPath = url.path
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = [
+            "-e",
+            "tell application \"Finder\" to delete POSIX file \"\(escapedPath)\""
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return false
+        }
+
+        return process.terminationStatus == 0 && !FileManager.default.fileExists(atPath: url.path)
+    }
+
+    private func restoreUsingFinder(_ trashURL: URL) -> Bool {
+        let escapedPath = trashURL.path
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = [
+            "-e",
+            "tell application \"Finder\" to put back POSIX file \"\(escapedPath)\""
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    private func findTrashItem(named fileName: String, removedAfter date: Date) -> URL? {
+        let trashURL = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".Trash")
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: trashURL, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else {
+            return nil
+        }
+
+        return contents
+            .filter { $0.lastPathComponent == fileName }
+            .sorted { lhs, rhs in
+                let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhsDate > rhsDate
+            }
+            .first { url in
+                let modDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return modDate >= date
+            }
+    }
+
+    private static func loadRecentTrashRecords() -> [TrashRecord] {
+        guard let data = UserDefaults.standard.data(forKey: trashRecordsKey),
+              let records = try? JSONDecoder().decode([TrashRecord].self, from: data) else {
+            return []
+        }
+        return records.filter { FileManager.default.fileExists(atPath: $0.trashURL.path) }
+    }
+
+    private func saveRecentTrashRecords() {
+        let records = recentTrashRecords.filter { FileManager.default.fileExists(atPath: $0.trashURL.path) }
+        if let data = try? JSONEncoder().encode(records) {
+            UserDefaults.standard.set(data, forKey: Self.trashRecordsKey)
+        }
+    }
+
+    private func failureLabel(for url: URL) -> String {
+        "\(url.lastPathComponent)（\(url.path)）"
+    }
+
+    private func publishCleanupFailures(_ failures: [String]) {
+        guard !failures.isEmpty else { return }
+
+        let visibleFailures = failures.prefix(5).joined(separator: "\n")
+        let remaining = failures.count > 5 ? "\n以及另外 \(failures.count - 5) 项。" : ""
+        cleanupErrorMessage = "以下项目没有被移入废纸篓，可能是应用仍在运行、权限不足，或路径受系统保护：\n\(visibleFailures)\(remaining)"
     }
 }
 

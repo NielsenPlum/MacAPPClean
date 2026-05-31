@@ -208,6 +208,7 @@ private struct CleanerItemRow: View {
 
 private struct CleanupBar: View {
     @Bindable var store: CleanerStore
+    @State private var deletionListIsPresented = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -232,6 +233,14 @@ private struct CleanupBar: View {
             .disabled(store.selectedCount == 0)
 
             Button {
+                deletionListIsPresented = true
+            } label: {
+                Label("删除清单", systemImage: "list.bullet.rectangle")
+                    .font(.subheadline)
+            }
+            .disabled(store.restorableTrashCount == 0)
+
+            Button {
                 store.removeSelected()
             } label: {
                 Label("移入废纸篓", systemImage: "trash")
@@ -244,5 +253,72 @@ private struct CleanupBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(.bar)
+        .sheet(isPresented: $deletionListIsPresented) {
+            DeletionListSheet(store: store)
+        }
+    }
+}
+
+private struct DeletionListSheet: View {
+    @Bindable var store: CleanerStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("删除清单")
+                        .font(.title2.weight(.semibold))
+                    Text("选择要恢复的 App 或项目")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button("完成") {
+                    dismiss()
+                }
+            }
+            .padding(20)
+
+            Divider()
+
+            if store.deletedTrashBatches.isEmpty {
+                ContentUnavailableView("没有可恢复项目", systemImage: "trash", description: Text("通过 MacAppClean 移入废纸篓的项目会出现在这里。"))
+                    .frame(minHeight: 260)
+            } else {
+                List {
+                    ForEach(store.deletedTrashBatches) { batch in
+                        HStack(spacing: 12) {
+                            Image(systemName: "app.badge")
+                                .font(.title3)
+                                .foregroundStyle(.blue)
+                                .frame(width: 34)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(batch.name)
+                                    .font(.subheadline.weight(.semibold))
+                                Text("\(batch.itemCount) 个项目 · \(batch.formattedSize) · \(batch.removedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Button("恢复") {
+                                store.restoreDeletedBatch(id: batch.id)
+                                if store.deletedTrashBatches.isEmpty {
+                                    dismiss()
+                                }
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(minWidth: 600, minHeight: 420)
     }
 }
