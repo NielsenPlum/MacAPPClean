@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Bindable var store: CleanerStore
@@ -61,6 +63,13 @@ struct ContentView: View {
         } message: {
             Text(store.restoreErrorMessage ?? "")
         }
+        .alert("无法导出审计日志", isPresented: auditExportErrorIsPresented) {
+            Button("好") {
+                store.auditExportErrorMessage = nil
+            }
+        } message: {
+            Text(store.auditExportErrorMessage ?? "")
+        }
         .sheet(isPresented: $deletionListIsPresented) {
             DeletionListView(store: store)
         }
@@ -98,6 +107,17 @@ struct ContentView: View {
             }
         )
     }
+
+    private var auditExportErrorIsPresented: Binding<Bool> {
+        Binding(
+            get: { store.auditExportErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    store.auditExportErrorMessage = nil
+                }
+            }
+        )
+    }
 }
 
 private struct DeletionListView: View {
@@ -116,6 +136,13 @@ private struct DeletionListView: View {
                 }
 
                 Spacer()
+
+                Button {
+                    exportAuditLog()
+                } label: {
+                    Label("导出日志", systemImage: "square.and.arrow.up")
+                }
+                .disabled(store.deletionHistoryCount == 0)
 
                 Button("完成") {
                     dismiss()
@@ -142,6 +169,30 @@ private struct DeletionListView: View {
         }
         .frame(minWidth: 640, minHeight: 440)
     }
+
+    private func exportAuditLog() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "MacAppClean-Uninstall-Audit-\(Self.fileDateFormatter.string(from: Date())).json"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            try store.exportDeletionAuditLog(to: url)
+            store.lastScanSummary = "已导出卸载审计日志：\(url.lastPathComponent)"
+        } catch {
+            store.auditExportErrorMessage = error.localizedDescription
+        }
+    }
+
+    private static let fileDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }()
 }
 
 private struct DeletionBatchRow: View {

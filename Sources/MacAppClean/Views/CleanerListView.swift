@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct CleanerListView: View {
     @Bindable var store: CleanerStore
@@ -276,6 +278,13 @@ private struct DeletionListSheet: View {
 
                 Spacer()
 
+                Button {
+                    exportAuditLog()
+                } label: {
+                    Label("导出日志", systemImage: "square.and.arrow.up")
+                }
+                .disabled(store.deletionHistoryCount == 0)
+
                 Button("完成") {
                     dismiss()
                 }
@@ -322,4 +331,28 @@ private struct DeletionListSheet: View {
         }
         .frame(minWidth: 600, minHeight: 420)
     }
+
+    private func exportAuditLog() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "MacAppClean-Uninstall-Audit-\(Self.fileDateFormatter.string(from: Date())).json"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            try store.exportDeletionAuditLog(to: url)
+            store.lastScanSummary = "已导出卸载审计日志：\(url.lastPathComponent)"
+        } catch {
+            store.auditExportErrorMessage = error.localizedDescription
+        }
+    }
+
+    private static let fileDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }()
 }

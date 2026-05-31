@@ -4,7 +4,7 @@ import Observation
 
 @Observable
 final class CleanerStore {
-    private struct TrashRecord: Codable, Identifiable, Hashable {
+    struct TrashRecord: Codable, Identifiable, Hashable {
         var id = UUID()
         var batchID = UUID()
         var batchName = "已移除项目"
@@ -122,11 +122,14 @@ final class CleanerStore {
     var cleanupErrorMessage: String?
     var scanAccessMessage: String?
     var restoreErrorMessage: String?
+    var auditExportErrorMessage: String?
     private var recentTrashRecords: [TrashRecord] = []
-    private static let trashRecordsKey = "MacAppClean.recentTrashRecords"
+    static let trashRecordsKey = "MacAppClean.recentTrashRecords"
+    private let defaults: UserDefaults
 
-    init() {
-        recentTrashRecords = Self.loadRecentTrashRecords()
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        recentTrashRecords = Self.loadRecentTrashRecords(defaults: defaults)
     }
 
     var restorableTrashCount: Int {
@@ -1092,6 +1095,37 @@ final class CleanerStore {
         }
     }
 
+    func deletionAuditLog(generatedAt: Date = Date()) -> UninstallAuditLog {
+        UninstallAuditLog(
+            schemaVersion: 1,
+            appName: "MacAppClean",
+            generatedAt: generatedAt,
+            records: recentTrashRecords
+                .sorted { $0.removedAt > $1.removedAt }
+                .map { record in
+                    UninstallAuditLog.Record(
+                        id: record.id,
+                        batchID: record.batchID,
+                        batchName: record.batchName,
+                        originalPath: record.originalURL.path,
+                        trashPath: record.trashURL.path,
+                        removedAt: record.removedAt,
+                        restoredAt: record.restoredAt,
+                        size: record.size,
+                        status: auditStatus(for: record)
+                    )
+                }
+        )
+    }
+
+    func exportDeletionAuditLog(to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(deletionAuditLog())
+        try data.write(to: url, options: .atomic)
+    }
+
     private func trashIfNeeded(_ url: URL, failures: inout [String], records: inout [TrashRecord], batchID: UUID, batchName: String) -> Bool {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return true }
@@ -1265,8 +1299,22 @@ final class CleanerStore {
             }
     }
 
-    private static func loadRecentTrashRecords() -> [TrashRecord] {
-        guard let data = UserDefaults.standard.data(forKey: trashRecordsKey),
+    private func auditStatus(for record: TrashRecord) -> UninstallAuditLog.Status {
+        let fm = FileManager.default
+        if record.restoredAt != nil {
+            return .restored
+        }
+        if fm.fileExists(atPath: record.originalURL.path) {
+            return .originalExists
+        }
+        if fm.fileExists(atPath: record.trashURL.path) {
+            return .restorable
+        }
+        return .missingFromTrash
+    }
+
+    private static func loadRecentTrashRecords(defaults: UserDefaults) -> [TrashRecord] {
+        guard let data = defaults.data(forKey: trashRecordsKey),
               let records = try? JSONDecoder().decode([TrashRecord].self, from: data) else {
             return []
         }
@@ -1277,7 +1325,7 @@ final class CleanerStore {
         recentTrashRecords = Array(recentTrashRecords.suffix(500))
         let records = recentTrashRecords
         if let data = try? JSONEncoder().encode(records) {
-            UserDefaults.standard.set(data, forKey: Self.trashRecordsKey)
+            defaults.set(data, forKey: Self.trashRecordsKey)
         }
     }
 
