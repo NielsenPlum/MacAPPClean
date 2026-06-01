@@ -79,7 +79,7 @@ struct CleanerListView: View {
             Text("暂无\(store.selectedSection.rawValue)")
                 .font(.title3)
                 .foregroundStyle(.secondary)
-            Text("点击左侧「立即扫描」按钮开始检测")
+            Text(store.isScanning ? (store.scanProgress.isEmpty ? "正在扫描..." : store.scanProgress) : "点击左侧「立即扫描」按钮开始检测")
                 .font(.subheadline)
                 .foregroundStyle(.tertiary)
             Spacer()

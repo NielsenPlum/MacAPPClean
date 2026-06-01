@@ -117,6 +117,7 @@ struct CleanerItem: Identifiable, Hashable {
     var description: String
     var permissions: [String]
     var files: [ScannedFile]
+    var officialUninstallers: [OfficialUninstallerCandidate] = []
     var isSelected: Bool
     var appURL: URL?
 
@@ -147,6 +148,7 @@ struct CleanerItem: Identifiable, Hashable {
             description: "",
             permissions: [],
             files: [],
+            officialUninstallers: [],
             isSelected: false,
             appURL: nil
         )

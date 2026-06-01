@@ -230,37 +230,71 @@ final class CleanerStore {
 
             scanProgress = "正在扫描 /Applications..."
             var seenAppPaths = Set<String>()
-            scanned += await scanApplicationsDirectory(url: URL(fileURLWithPath: "/Applications"), seenPaths: &seenAppPaths, knowledgeBase: knowledgeBase)
-            scanned += await scanApplicationsDirectory(url: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Applications"), seenPaths: &seenAppPaths, knowledgeBase: knowledgeBase)
+            _ = await scanApplicationsDirectory(url: URL(fileURLWithPath: "/Applications"), seenPaths: &seenAppPaths, knowledgeBase: knowledgeBase) { item in
+                scanned.append(item)
+                publishScannedItems(scanned)
+            }
+            _ = await scanApplicationsDirectory(url: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Applications"), seenPaths: &seenAppPaths, knowledgeBase: knowledgeBase) { item in
+                scanned.append(item)
+                publishScannedItems(scanned)
+            }
 
             scanProgress = "正在扫描启动项..."
-            scanned += await scanStartupPrograms()
+            _ = await scanStartupPrograms { item in
+                scanned.append(item)
+                publishScannedItems(scanned)
+            }
 
             scanProgress = "正在扫描扩展..."
-            scanned += await scanExtensions()
+            _ = await scanExtensions { item in
+                scanned.append(item)
+                publishScannedItems(scanned)
+            }
 
             scanProgress = "正在扫描残留文件..."
-            scanned += await scanLeftovers()
+            _ = await scanLeftovers { item in
+                scanned.append(item)
+                publishScannedItems(scanned)
+            }
 
             scanProgress = "正在扫描大文件..."
-            scanned += await scanLargeFiles(accessibleDirectoryPaths: folderAccess.accessiblePaths)
+            _ = await scanLargeFiles(accessibleDirectoryPaths: folderAccess.accessiblePaths) { item in
+                scanned.append(item)
+                publishScannedItems(scanned)
+            }
 
             scanProgress = "正在检查安全状态..."
             scanned = await scanSecurity(items: scanned)
+            publishScannedItems(scanned)
 
             scanProgress = "正在检查更新..."
             scanned = await checkUpdates(items: scanned, knowledgeBase: knowledgeBase)
+            publishScannedItems(scanned)
 
             scanned = deduplicatedItems(scanned)
 
             try? await Task.sleep(for: .milliseconds(200))
-            self.items = scanned
+            publishScannedItems(scanned)
             self.isScanning = false
             self.scanProgress = ""
             self.lastScanSummary = "扫描完成。在 \(CleanerSection.allCases.count) 个分类中共发现 \(scanned.count) 个项目，预估可释放 \(ByteCountFormatter.string(fromByteCount: totalRecoverable, countStyle: .file))。"
             if !folderAccess.deniedNames.isEmpty {
                 self.scanAccessMessage = "以下文件夹没有授权，本次已跳过对应的大文件扫描：\(folderAccess.deniedNames.joined(separator: "、"))。\n\n如需以后不再反复确认，请在系统设置 > 隐私与安全性 > 文件和文件夹中允许 MacAppClean 访问这些目录；本地开发构建还需要保持稳定签名。"
             }
+        }
+    }
+
+    private func publishScannedItems(_ scanned: [CleanerItem]) {
+        let selectedIDs = Set(items.filter(\.isSelected).map(\.id))
+        items = deduplicatedItems(scanned).map { item in
+            var item = item
+            if selectedIDs.contains(item.id) {
+                item.isSelected = true
+            }
+            return item
+        }
+        if let selectedItemID, !items.contains(where: { $0.id == selectedItemID }) {
+            self.selectedItemID = nil
         }
     }
 
@@ -388,7 +422,12 @@ final class CleanerStore {
 
     // MARK: - Application Scanner
 
-    private func scanApplicationsDirectory(url: URL, seenPaths: inout Set<String>, knowledgeBase: KnowledgeBaseSnapshot) async -> [CleanerItem] {
+    private func scanApplicationsDirectory(
+        url: URL,
+        seenPaths: inout Set<String>,
+        knowledgeBase: KnowledgeBaseSnapshot,
+        onItemFound: (CleanerItem) async -> Void = { _ in }
+    ) async -> [CleanerItem] {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return [] }
 
@@ -414,11 +453,13 @@ final class CleanerStore {
 
                         let name = (try? resolved.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? resolved.deletingPathExtension().lastPathComponent
                         let (version, lastUsed, developer) = getAppInfo(at: resolved)
+                        let identity = AppIdentity(appURL: resolved)
                         let relatedFiles = findRelatedFiles(for: resolved, knowledgeBase: knowledgeBase)
+                        let officialUninstallers = OfficialUninstallerDetector().detect(for: identity)
                         let appSize = directoryTotalSize(url: resolved)
                         let totalSize = appSize + relatedFiles.map(\.size).reduce(0, +)
 
-                        results.append(CleanerItem(
+                        let item = CleanerItem(
                             id: UUID(),
                             name: name,
                             developer: developer,
@@ -432,9 +473,13 @@ final class CleanerStore {
                             description: "完整的应用包及其支持文件。",
                             permissions: extractPermissions(from: resolved),
                             files: relatedFiles,
+                            officialUninstallers: officialUninstallers,
                             isSelected: false,
                             appURL: resolved
-                        ))
+                        )
+                        results.append(item)
+                        await onItemFound(item)
+                        await Task.yield()
                     } else {
                         // Regular directory - add to scan queue
                         dirsToScan.append(itemURL)
@@ -480,7 +525,7 @@ final class CleanerStore {
 
     // MARK: - Startup Programs Scanner
 
-    private func scanStartupPrograms() async -> [CleanerItem] {
+    private func scanStartupPrograms(onItemFound: (CleanerItem) async -> Void = { _ in }) async -> [CleanerItem] {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         var results: [CleanerItem] = []
@@ -523,6 +568,8 @@ final class CleanerStore {
                 appURL: file
             )
             results.append(item)
+            await onItemFound(item)
+            await Task.yield()
         }
 
         return results
@@ -530,7 +577,7 @@ final class CleanerStore {
 
     // MARK: - Extensions Scanner
 
-    private func scanExtensions() async -> [CleanerItem] {
+    private func scanExtensions(onItemFound: (CleanerItem) async -> Void = { _ in }) async -> [CleanerItem] {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         var results: [CleanerItem] = []
@@ -543,13 +590,16 @@ final class CleanerStore {
                 let name = ext.deletingPathExtension().lastPathComponent
                 let extSize = directoryTotalSize(url: ext)
                 let modDate = (try? ext.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
-                results.append(CleanerItem(
+                let item = CleanerItem(
                     id: UUID(), name: name, developer: "Safari", section: .extensions,
                     icon: "safari", size: extSize, lastUsed: modDate.relativeFormatted,
                     version: "-", health: .verified, description: "Safari 浏览器扩展",
                     permissions: ["网页内容"], files: [ScannedFile(url: ext, size: extSize, isDirectory: false, modDate: modDate, category: .extensionFile)],
                     isSelected: false, appURL: ext
-                ))
+                )
+                results.append(item)
+                await onItemFound(item)
+                await Task.yield()
             }
         }
 
@@ -560,13 +610,16 @@ final class CleanerStore {
             for kext in kextFiles where kext.pathExtension == "kext" {
                 let name = kext.deletingPathExtension().lastPathComponent
                 let kextSize = directoryTotalSize(url: kext)
-                results.append(CleanerItem(
+                let item = CleanerItem(
                     id: UUID(), name: name, developer: "系统", section: .extensions,
                     icon: "puzzlepiece.extension", size: kextSize, lastUsed: "-",
                     version: "-", health: .verified, description: "系统扩展 / 内核扩展",
                     permissions: ["系统"], files: [],
                     isSelected: false, appURL: kext
-                ))
+                )
+                results.append(item)
+                await onItemFound(item)
+                await Task.yield()
             }
         }
 
@@ -575,7 +628,7 @@ final class CleanerStore {
 
     // MARK: - Leftovers Scanner
 
-    private func scanLeftovers() async -> [CleanerItem] {
+    private func scanLeftovers(onItemFound: (CleanerItem) async -> Void = { _ in }) async -> [CleanerItem] {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         var results: [CleanerItem] = []
@@ -616,7 +669,7 @@ final class CleanerStore {
                     .replacingOccurrences(of: "^com\\.", with: "", options: .regularExpression)
                     .components(separatedBy: ".").last ?? possibleBundleID
 
-                results.append(CleanerItem(
+                let item = CleanerItem(
                     id: UUID(), name: appName, developer: "未知开发者", section: .remainingFiles,
                     icon: "folder.badge.minus", size: itemSize, lastUsed: modDate.relativeFormatted,
                     version: "-", health: .warning,
@@ -624,7 +677,10 @@ final class CleanerStore {
                     permissions: [],
                     files: [ScannedFile(url: item, size: itemSize, isDirectory: isDir.boolValue, modDate: modDate, category: .leftover)],
                     isSelected: false, appURL: item
-                ))
+                )
+                results.append(item)
+                await onItemFound(item)
+                await Task.yield()
             }
         }
 
@@ -633,7 +689,10 @@ final class CleanerStore {
 
     // MARK: - Large Files Scanner
 
-    private func scanLargeFiles(accessibleDirectoryPaths: Set<String>) async -> [CleanerItem] {
+    private func scanLargeFiles(
+        accessibleDirectoryPaths: Set<String>,
+        onItemFound: (CleanerItem) async -> Void = { _ in }
+    ) async -> [CleanerItem] {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         var results: [CleanerItem] = []
@@ -692,7 +751,7 @@ final class CleanerStore {
                 default: dirName = dir.lastPathComponent
                 }
 
-                results.append(CleanerItem(
+                let item = CleanerItem(
                     id: UUID(), name: "\(dirName) 大文件", developer: "本地",
                     section: .largeFiles, icon: "doc.text.magnifyingglass",
                     size: totalSize, lastUsed: "今天",
@@ -700,7 +759,10 @@ final class CleanerStore {
                     description: "\(dirName) 文件夹中大于 100MB 的文件。",
                     permissions: [], files: largeFiles,
                     isSelected: false, appURL: dir
-                ))
+                )
+                results.append(item)
+                await onItemFound(item)
+                await Task.yield()
             }
         }
 
@@ -1051,6 +1113,25 @@ final class CleanerStore {
 
         rememberTrashRecords(trashRecords)
         publishCleanupFailures(failures)
+    }
+
+    func openOfficialUninstaller(_ candidate: OfficialUninstallerCandidate, for item: CleanerItem) {
+        if NSWorkspace.shared.open(candidate.url) {
+            lastScanSummary = "已打开 \(candidate.displayName)。完成官方卸载后，请重新扫描并清理剩余项目。"
+        } else {
+            cleanupErrorMessage = "无法打开 \(candidate.displayName)。你仍可以使用 MacAppClean 将 \(item.name) 的已选项目移入废纸篓。"
+        }
+    }
+
+    func searchOfficialUninstaller(for item: CleanerItem) {
+        guard let appURL = item.appURL else { return }
+        let url = OfficialUninstallerSearch.searchURL(for: AppIdentity(appURL: appURL))
+
+        if NSWorkspace.shared.open(url) {
+            lastScanSummary = "已打开浏览器搜索 \(item.name) 的官方卸载程序。请优先确认来源为开发者官网。"
+        } else {
+            cleanupErrorMessage = "无法打开浏览器搜索 \(item.name) 的官方卸载程序。"
+        }
     }
 
     func restoreLastRemovedItems() {

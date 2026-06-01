@@ -50,6 +50,7 @@ private struct AppUninstallDetailView: View {
     @Bindable var store: CleanerStore
     @State private var expandedCategories: Set<ScannedFile.FileCategory> = Set(ScannedFile.FileCategory.allCases)
     @State private var selectedPaths: Set<String> = []
+    @State private var pendingOfficialUninstaller: OfficialUninstallerCandidate?
 
     private var uninstallEntries: [UninstallEntry] {
         var entries: [UninstallEntry] = []
@@ -104,6 +105,16 @@ private struct AppUninstallDetailView: View {
                 onToggleAll: toggleAllEntries
             )
 
+            OfficialUninstallerPanel(
+                candidates: item.officialUninstallers,
+                onOpen: { candidate in
+                    pendingOfficialUninstaller = candidate
+                },
+                onSearch: {
+                    store.searchOfficialUninstaller(for: item)
+                }
+            )
+
             VStack(spacing: 10) {
                 ForEach(groupedEntries) { group in
                     UninstallFileGroup(
@@ -138,7 +149,38 @@ private struct AppUninstallDetailView: View {
         .onChange(of: item.id) { _, _ in
             selectDefaultEntries()
             expandedCategories = Set(ScannedFile.FileCategory.allCases)
+            pendingOfficialUninstaller = nil
         }
+        .confirmationDialog(
+            "使用官方卸载器？",
+            isPresented: officialUninstallerConfirmationIsPresented,
+            titleVisibility: .visible
+        ) {
+            if let pendingOfficialUninstaller {
+                Button("打开 \(pendingOfficialUninstaller.displayName)") {
+                    store.openOfficialUninstaller(pendingOfficialUninstaller, for: item)
+                    self.pendingOfficialUninstaller = nil
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingOfficialUninstaller = nil
+            }
+        } message: {
+            if let pendingOfficialUninstaller {
+                Text("将打开 \(pendingOfficialUninstaller.displayName)。完成官方卸载后，请重新扫描并使用 MacAppClean 清理剩余文件。")
+            }
+        }
+    }
+
+    private var officialUninstallerConfirmationIsPresented: Binding<Bool> {
+        Binding(
+            get: { pendingOfficialUninstaller != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingOfficialUninstaller = nil
+                }
+            }
+        )
     }
 
     private func selectAllEntries() {
@@ -155,6 +197,68 @@ private struct AppUninstallDetailView: View {
         } else {
             selectAllEntries()
         }
+    }
+}
+
+private struct OfficialUninstallerPanel: View {
+    var candidates: [OfficialUninstallerCandidate]
+    var onOpen: (OfficialUninstallerCandidate) -> Void
+    var onSearch: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: candidates.isEmpty ? "shield.slash" : "checkmark.shield")
+                    .font(.title3)
+                    .foregroundStyle(candidates.isEmpty ? Color.secondary : Color.green)
+                    .frame(width: 24)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(candidates.isEmpty ? "未发现官方卸载程序" : "发现官方卸载程序")
+                        .font(.headline)
+                    Text(candidates.isEmpty ? "本机未找到可直接打开的卸载器，可在线搜索官方卸载程序或继续使用规则清理。" : "建议先使用官方卸载器，完成后重新扫描并清理剩余文件。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button {
+                    onSearch()
+                } label: {
+                    Label("在线搜索", systemImage: "safari")
+                }
+            }
+
+            ForEach(candidates) { candidate in
+                HStack(spacing: 10) {
+                    Image(systemName: candidate.kind == .app ? "app.badge" : "shippingbox")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(candidate.displayName)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        Text("\(candidate.kind.displayName) · \(candidate.source.displayName)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        onOpen(candidate)
+                    } label: {
+                        Label("使用", systemImage: "arrow.up.forward.app")
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .padding(14)
+        .background(.bar, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
